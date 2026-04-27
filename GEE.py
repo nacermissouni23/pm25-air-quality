@@ -8,10 +8,10 @@ ee.Authenticate()
 ee.Initialize(project='group-project-493422')
 
 # Load your coordinates
-coords_df = pd.read_csv('unique_coordinates.csv')  # Your 110 locations
+coords_df = pd.read_csv('unique_coordinates.csv')
 
 # Load your unique dates from PM2.5 data
-dates_df = pd.read_csv('unique_dates.csv')  # Your 2463 dates
+dates_df = pd.read_csv('unique_dates.csv')
 dates_list = pd.to_datetime(dates_df['date']).dt.strftime('%Y-%m-%d').tolist()
 
 # TEST MODE: Set to True to test with a few locations and dates
@@ -39,14 +39,26 @@ def extract_features_for_date(date_str):
     date = ee.Date(date_str)
     next_date = date.advance(1, 'day')
     
-    # Meteorology
+    # Meteorology (no PBLH in daily aggregate)
     era5 = ee.ImageCollection('ECMWF/ERA5_LAND/DAILY_AGGR') \
         .filterDate(date, next_date) \
         .select(['temperature_2m', 'surface_pressure', 
-                 'u_component_of_wind_10m', 'v_component_of_wind_10m']) \
+                 'u_component_of_wind_10m', 'v_component_of_wind_10m',
+                 'dewpoint_temperature_2m']) \
         .mean()
     
-    # Air Quality (will be null for pre-2018)
+    # Calculate relative humidity
+    def calculate_rh(temp_k, dewpoint_k):
+        temp_c = temp_k.subtract(273.15)
+        dewpoint_c = dewpoint_k.subtract(273.15)
+        numerator = dewpoint_c.divide(243.04).add(dewpoint_c)
+        denominator = temp_c.divide(243.04).add(temp_c)
+        rh = ee.Image(100).multiply((numerator.subtract(denominator)).exp())
+        return rh.clamp(0, 100)
+    
+    rh = calculate_rh(era5.select('temperature_2m'), era5.select('dewpoint_temperature_2m'))
+    
+    # Air Quality
     no2 = ee.ImageCollection('COPERNICUS/S5P/OFFL/L3_NO2') \
         .filterDate(date, next_date) \
         .select('NO2_column_number_density') \
@@ -70,16 +82,17 @@ def extract_features_for_date(date_str):
         .multiply(0.001)
     
     # Combine
-    combined = era5.addBands(no2).addBands(co).addBands(o3).addBands(aod)
+    combined = era5.addBands(no2).addBands(co).addBands(o3).addBands(aod) \
+        .addBands(rh.rename('relative_humidity'))
     
-    # Sample at points
+    # Sample
     sampled = combined.sampleRegions(
         collection=points,
         scale=11132,
         properties=['id', 'lat', 'lon']
     )
     
-    # Add date and convert units
+    # Format output
     result = sampled.map(lambda f: f
         .set('date', date_str)
         .set('datetime_utc', ee.Date(date_str).format('YYYY-MM-dd HH:mm:ss'))
@@ -87,6 +100,7 @@ def extract_features_for_date(date_str):
         .set('pressure_mb', ee.Number(f.get('surface_pressure')).divide(100))
         .set('wind_u', f.get('u_component_of_wind_10m'))
         .set('wind_v', f.get('v_component_of_wind_10m'))
+        .set('relative_humidity', f.get('relative_humidity'))
         .set('NO2', f.get('NO2_column_number_density'))
         .set('CO', f.get('CO_column_number_density'))
         .set('O3', f.get('O3_column_number_density'))
@@ -131,7 +145,8 @@ final_df = pd.concat(all_data, ignore_index=True)
 desired_columns = [
     'date', 'datetime_utc', 'id', 'lat', 'lon',
     'temperature_celsius', 'pressure_mb', 
-    'wind_u', 'wind_v', 'NO2', 'CO', 'O3', 'AOD'
+    'wind_u', 'wind_v', 'relative_humidity',
+    'NO2', 'CO', 'O3', 'AOD'
 ]
 for col in desired_columns:
     if col not in final_df.columns:
