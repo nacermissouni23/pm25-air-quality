@@ -3,17 +3,16 @@ import pandas as pd
 from tqdm import tqdm
 
 # Load dataset
-df = pd.read_csv('combined_gee_pm25.csv')
-unique_coords = df[['latitude', 'longitude']].drop_duplicates()
+unique_coord = pd.read_csv('unique_locations.csv')
 
 # Increase radius to 2000m
 radius = 2000
 
 features_list = []
-for idx, row in tqdm(unique_coords.iterrows(), total=len(unique_coords)):
-    lat, lon = row['latitude'], row['longitude']
+for _, loc_row in tqdm(unique_coord.iterrows(), total=len(unique_coord), desc="Locations"):
+    lat, lon = loc_row['latitude'], loc_row['longitude']
     
-    # Default zeros
+    # Default zeros for static land features
     n_buildings = 0
     road_length = 0
     industrial_count = 0
@@ -48,7 +47,7 @@ for idx, row in tqdm(unique_coords.iterrows(), total=len(unique_coords)):
         green_count = len(green) if not green.empty else 0
     except:
         pass
-    
+
     features_list.append({
         'latitude': lat,
         'longitude': lon,
@@ -60,6 +59,5 @@ for idx, row in tqdm(unique_coords.iterrows(), total=len(unique_coords)):
 
 # Merge
 osm_features = pd.DataFrame(features_list)
-df = df.merge(osm_features, on=['latitude', 'longitude'], how='left')
-df.to_csv('dataset_with_landuse.csv', index=False)
-print(f"Done! Processed {len(unique_coords)} locations with {radius}m radius")
+osm_features.to_csv('land_features.csv', index=False)
+print(f"Done! Processed {len(unique_coord)} locations with {radius}m radius")
