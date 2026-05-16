@@ -86,20 +86,39 @@ class Engine:
         Returns a DataFrame with the features ready for prediction.
         '''
         GEE_features = self.get_GEE_features(lat, lon, date)
+        if GEE_features is None:
+            gee_cols = ['temperature_celsius', 'dewpoint_celsius', 'pressure_mb', 'wind_u', 'wind_v', 'NO2', 'CO', 'O3', 'AOD', 'relative_humidity', 'datetime_utc']
+            GEE_features = pd.DataFrame([[np.nan] * len(gee_cols)], columns=gee_cols)
+            
         OSM_features = self.get_OSM_features(lat, lon)
+        if OSM_features is None:
+            osm_cols = ['building_density', 'road_density_km', 'industrial_presence', 'green_space_fraction']
+            OSM_features = pd.DataFrame([[np.nan] * len(osm_cols)], columns=osm_cols)
 
-        if GEE_features is not None and OSM_features is not None:
-            features = pd.concat([GEE_features, OSM_features], axis=1)
-            features['latitude'] = lat
-            features['longitude'] = lon
-            features['date'] = date
-            features['wilaya'] = wilaya
-            features['sensor_name'] = "Unknown"
-            features['id'] = 1
-            # Add wilaya to columns if not present
-            cols = self.columns + (['wilaya'] if 'wilaya' not in self.columns else [])
-            return features[cols]  # Ensure the order of columns matches the model's expectations
-        return None
+        features = pd.concat([GEE_features, OSM_features], axis=1)
+        features['latitude'] = lat
+        features['longitude'] = lon
+        features['date'] = str(date)
+        features['wilaya'] = wilaya
+        features['sensor_name'] = "Unknown"
+        features['id'] = 1
+        
+        # Add wilaya to columns if not present
+        cols = self.columns + (['wilaya'] if 'wilaya' not in self.columns else [])
+        
+        # Impute missing features from historical data mean
+        for col in cols:
+            if col in features.columns and pd.isna(features.at[0, col]) and not self.hist_data.empty:
+                if col in self.hist_data.columns and pd.api.types.is_numeric_dtype(self.hist_data[col]):
+                    wilaya_hist = self.hist_data[self.hist_data['wilaya'] == wilaya]
+                    if not wilaya_hist.empty and not wilaya_hist[col].isna().all():
+                        mean_val = wilaya_hist[col].mean()
+                        features.at[0, col] = mean_val
+                    else:
+                        global_mean = self.hist_data[col].mean()
+                        features.at[0, col] = global_mean
+
+        return features[cols]  # Ensure the order of columns matches the model's expectations
     
     def get_GEE_features(self, lat, lon, date):
         return GEE.extract_features(lat, lon, str(date))
@@ -182,7 +201,8 @@ class Engine:
         
         # Merge coordinates with the predictions
         if not predictions_for_date.empty and 'wilaya' in predictions_for_date.columns:
-            map_data = pd.merge(self.wilaya_coords, predictions_for_date, on='wilaya', how='inner')
+            pred_to_merge = predictions_for_date.drop(columns=['latitude', 'longitude'], errors='ignore')
+            map_data = pd.merge(self.wilaya_coords, pred_to_merge, on='wilaya', how='inner')
         else:
             # Fallback if predicted_data isn't fully structured yet
             if wilaya == "All":

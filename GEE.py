@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 
 def initialize_gee():
     try:
-        # Lower the timeout to 10 seconds to fail fast instead of hanging for 2 minutes
-        ee.Initialize(project='group-project-493422', opt_url='https://earthengine-highvolume.googleapis.com', http_timeout=10)
+        # Connect to Google Earth Engine
+        ee.Initialize(project='group-project-493422', opt_url='https://earthengine-highvolume.googleapis.com')
     except Exception as e:
         print("\n\n" + "="*50)
         print("GOOGLE EARTH ENGINE AUTHENTICATION REQUIRED OR NETWORK TIMEOUT.")
