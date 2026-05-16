@@ -24,7 +24,10 @@ with st.sidebar:
     st.title("Algeria Air Quality")
     st.markdown("---")
     
-    date = st.date_input("Select Date", value=pd.to_datetime('today'),max_value=pd.to_datetime('today'))
+    # ERA5-Land data typically has a latency of 2-3 months, so we default to 90 days ago
+    default_date = pd.to_datetime('today') - pd.DateOffset(days=90)
+    date = st.date_input("Select Date", value=default_date, max_value=pd.to_datetime('today'))
+
     
     # Wilaya filter
     wilayas = ["All"] + engine.get_wilayas()
@@ -48,7 +51,7 @@ st.markdown(f"#### Monitoring PM2.5 Levels for **{date.strftime('%Y-%m-%d')}**")
 with st.spinner("Generating air quality map..."):
     try:
         fig = engine.initialize_map(date, selected_wilaya)
-        st.plotly_chart(fig, use_container_width=True, height=510)
+        st.plotly_chart(fig, width='stretch', height=510)
     except Exception as e:
         st.error(f"Error generating map: {e}")
 

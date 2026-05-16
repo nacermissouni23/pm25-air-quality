@@ -7,44 +7,63 @@ import json
 import joblib
 import streamlit as st
 import os
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import GEE
+import OSM
+
 
 
 class Engine:
     def __init__(self):
+        # Determine the absolute path to the dashboard directory
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        self.model_path = os.path.join(current_dir, "models", "xgb_model.pkl")
+        self.database_dir = os.path.join(current_dir, "database")
+        self.hist_path = os.path.join(self.database_dir, "hist_data.csv")
+        self.wilaya_coords_path = os.path.join(self.database_dir, "wilaya_coordinates.csv")
+        self.geojson_path = os.path.join(self.database_dir, "dz.json")
+        self.config_path = os.path.join(self.database_dir, "config.json")
+        self.predicted_data_path = os.path.join(self.database_dir, "predicted_data.csv")
+
         #loading the model
-        self.model = joblib.load("models/xgb_model.pkl")
+        self.model = joblib.load(self.model_path)
         # Ensure database directory exists
-        os.makedirs("database", exist_ok=True)
+        os.makedirs(self.database_dir, exist_ok=True)
+
         # Column schema shared by temp_data, predicted_data, and hist_data
         self.columns = [
             "date", "datetime_utc", "id", "latitude", "longitude",
             "temperature_celsius", "pressure_mb", "wind_u", "wind_v",
             "NO2", "CO", "O3", "AOD", "sensor_name",
             "building_density", "road_density_km", "industrial_presence",
-            "green_space_fraction", "relative_humidity"
+            "green_space_fraction", "relative_humidity", "wilaya"
         ]
         # Start with an empty temp DataFrame (written to disk when data arrives)
         self.temp_data = pd.DataFrame(columns=self.columns)
+        
         #initialize the history data file in /database
-        hist_path = "database/hist_data.csv"
-        if os.path.exists(hist_path):
-            self.hist_data = pd.read_csv(hist_path)
+        if os.path.exists(self.hist_path):
+            self.hist_data = pd.read_csv(self.hist_path)
         else:
             self.hist_data = pd.DataFrame(columns=self.columns)
-            self.hist_data.to_csv(hist_path, index=False)
+            self.hist_data.to_csv(self.hist_path, index=False)
+            
         #read the wilaya coordinates mapping from /database
-        self.wilaya_coords = pd.read_csv("database/wilaya_coordinates.csv")
+        self.wilaya_coords = pd.read_csv(self.wilaya_coords_path)
         # Start with an empty predicted DataFrame (includes Prediction column)
         self.predicted_data = pd.DataFrame(columns=self.columns + ["Prediction"])
         #load the GeoJSON for wilaya boundaries (used for choropleth map)
-        with open("database/dz.json", "r", encoding="utf-8") as f:
+        with open(self.geojson_path, "r", encoding="utf-8") as f:
             self.geojson = json.load(f)
-        #load config.json still don't know if it's needed
-        with open("database/config.json", "r") as f:
+        #load config.json
+        with open(self.config_path, "r") as f:
             self.config = json.load(f)
         self.low_range = self.config['low_range']
         self.medium_range = self.config['medium_range']
         self.high_range = self.config['high_range']
+
     # Helper functions
     def get_coordinates(self, wilaya):
         #get the coordinates of the wilaya from the wilaya_coords dataframe
@@ -57,33 +76,87 @@ class Engine:
         coords = self.get_coordinates(wilaya)
         lat = coords[0]
         lon = coords[1]
-        features = self.data_extractor_helper(lat,lon,date)
+        features = self.data_extractor_helper(lat,lon,date, wilaya)
         return features
 
 
-    def data_extractor_helper(self,lat,lon,date):
-        #To be implemented
+    def data_extractor_helper(self,lat,lon,date, wilaya):
+        '''
+        Calls GEE and OSM APIs to retrieve the features for the given latitude, longitude, and date.
+        Returns a DataFrame with the features ready for prediction.
+        '''
+        GEE_features = self.get_GEE_features(lat, lon, date)
+        OSM_features = self.get_OSM_features(lat, lon)
+
+        if GEE_features is not None and OSM_features is not None:
+            features = pd.concat([GEE_features, OSM_features], axis=1)
+            features['latitude'] = lat
+            features['longitude'] = lon
+            features['date'] = date
+            features['wilaya'] = wilaya
+            features['sensor_name'] = "Unknown"
+            features['id'] = 1
+            # Add wilaya to columns if not present
+            cols = self.columns + (['wilaya'] if 'wilaya' not in self.columns else [])
+            return features[cols]  # Ensure the order of columns matches the model's expectations
         return None
+    
+    def get_GEE_features(self, lat, lon, date):
+        return GEE.extract_features(lat, lon, str(date))
+    
+    def get_OSM_features(self, lat, lon):
+        return OSM.extract_features(lat, lon, radius=2000)
     ################################################################################33333333
     
     def make_prediction(self,wilaya,date):
+        past = self.get_from_history(wilaya, str(date))
+        if not past.empty: return past
+
+        predictions = self.get_from_predictions(wilaya, str(date))
+        if not predictions.empty: return predictions
+
         #make the prediction
         temp_data = self.get_features(wilaya,date)
         if temp_data is None:
             return None
-        prediction = self.model.predict(temp_data)
-        self.predicted_data['Prediction'] = prediction
-        self.predicted_data.to_csv("database/predicted_data.csv", index=False)
+            
+        # Extract only the numerical features expected by the model in the correct order
+        model_features = [
+            'latitude', 'longitude', 'temperature_celsius', 'pressure_mb', 'wind_u',
+            'wind_v', 'NO2', 'CO', 'O3', 'AOD', 'building_density', 'road_density_km',
+            'industrial_presence', 'green_space_fraction', 'relative_humidity'
+        ]
+        
+        # Filter and force cast all columns to floats (turns None/objects into np.nan natively for XGBoost)
+        features_for_pred = temp_data[model_features].apply(pd.to_numeric, errors='coerce').astype(float)
+        
+        prediction = self.model.predict(features_for_pred)
+        
+        temp_data['Prediction'] = prediction
+        
+        if self.predicted_data.empty or self.predicted_data.dropna(how='all', axis=1).empty:
+            self.predicted_data = temp_data.copy()
+        else:
+            self.predicted_data = pd.concat([self.predicted_data, temp_data], ignore_index=True)
+        self.predicted_data.to_csv(self.predicted_data_path, index=False)
+
         #append the predicted data to the history data
-        self.hist_data = pd.concat([self.hist_data, self.predicted_data], ignore_index=True)
-        self.hist_data.to_csv("database/hist_data.csv", index=False)
-        return self.predicted_data
+        if self.hist_data.empty or self.hist_data.dropna(how='all', axis=1).empty:
+            self.hist_data = temp_data.copy()
+        else:
+            self.hist_data = pd.concat([self.hist_data, temp_data], ignore_index=True).drop_duplicates(subset=["wilaya", "date"], keep="last")
+        self.hist_data.to_csv(self.hist_path, index=False)
+        return temp_data
+
+
         
     def get_from_predictions(self,wilaya,date):
-        return self.predicted_data[(self.predicted_data['Wilaya'] == wilaya) & (self.predicted_data['Date'] == date)]
+        if self.predicted_data.empty or 'wilaya' not in self.predicted_data.columns: return pd.DataFrame()
+        return self.predicted_data[(self.predicted_data['wilaya'] == wilaya) & (self.predicted_data['date'] == date)]
 
     def get_from_history(self,wilaya,date):
-        return self.hist_data[(self.hist_data['Wilaya'] == wilaya) & (self.hist_data['Date'] == date)]
+        if self.hist_data.empty or 'wilaya' not in self.hist_data.columns: return pd.DataFrame()
+        return self.hist_data[(self.hist_data['wilaya'] == wilaya) & (self.hist_data['date'] == str(date))]
 
 
     def initialize_map(self, date, wilaya="All"):
@@ -94,11 +167,16 @@ class Engine:
             target_wilayas = [wilaya]
 
         for w in target_wilayas:
-            self.make_prediction(w, date)
+            prediction_result = self.make_prediction(w, date)
+            if prediction_result is None:
+                raise Exception(f"Satellite data is not yet available for {date}. Please select an older date.")
             
-        #get the predictions for the given date
-        if not self.predicted_data.empty and 'date' in self.predicted_data.columns:
-            predictions_for_date = self.predicted_data[self.predicted_data['date'] == str(date)]
+        #get the predictions for the given date from both history and new predictions
+        historical_matches = self.hist_data[self.hist_data['date'] == str(date)] if not self.hist_data.empty and 'date' in self.hist_data.columns else pd.DataFrame()
+        predicted_matches = self.predicted_data[self.predicted_data['date'] == str(date)] if not self.predicted_data.empty and 'date' in self.predicted_data.columns else pd.DataFrame()
+        
+        if not historical_matches.empty or not predicted_matches.empty:
+            predictions_for_date = pd.concat([historical_matches, predicted_matches]).drop_duplicates(subset=["wilaya", "date"], keep="last")
         else:
             predictions_for_date = pd.DataFrame()
         
