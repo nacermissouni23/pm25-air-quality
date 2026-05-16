@@ -1,1 +1,11 @@
 scratch/*
+.vscode
+__pycache__
+cache
+data
+database
+models
+notebooks
+preprocesses_data
+scripts
+settings.py
