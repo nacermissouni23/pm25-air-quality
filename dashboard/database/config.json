@@ -1,0 +1,5 @@
+{
+    "low_range": [0, 12],
+    "medium_range": [12.1, 35.4],
+    "high_range": [35.5, 500]
+}

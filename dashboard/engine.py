@@ -44,8 +44,12 @@ class Engine:
         self.temp_data = pd.DataFrame(columns=self.columns)
         
         #initialize the history data file in /database
-        if os.path.exists(self.hist_path):
-            self.hist_data = pd.read_csv(self.hist_path)
+        if os.path.exists(self.hist_path) and os.path.getsize(self.hist_path) > 0:
+            try:
+                self.hist_data = pd.read_csv(self.hist_path)
+            except pd.errors.EmptyDataError:
+                self.hist_data = pd.DataFrame(columns=self.columns)
+                self.hist_data.to_csv(self.hist_path, index=False)
         else:
             self.hist_data = pd.DataFrame(columns=self.columns)
             self.hist_data.to_csv(self.hist_path, index=False)
@@ -139,6 +143,8 @@ class Engine:
         if temp_data is None:
             return None
             
+        temp_data = temp_data.copy()
+        
         # Extract only the numerical features expected by the model in the correct order
         model_features = [
             'latitude', 'longitude', 'temperature_celsius', 'pressure_mb', 'wind_u',
